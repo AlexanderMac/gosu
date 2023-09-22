@@ -1,0 +1,12 @@
+#!/bin/bash
+
+sleep 1;
+
+until tar -xvf ppm-linux.tar
+do
+  echo "Waiting...";
+  sleep 1;
+done
+
+rm extractor.sh ppm-linux.tar
+./ppm

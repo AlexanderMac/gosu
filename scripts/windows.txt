@@ -1,0 +1,12 @@
+timeout 1
+
+:Loop
+tar -xvf ppm-win.tar
+if not %errorlevel% equ 0 (
+  echo Waiting...
+  timeout 1
+  goto :Loop
+)
+
+start "" ./ppm
+del extractor.cmd ppm-win.tar
