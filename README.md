@@ -4,15 +4,15 @@
 [![MIT license](https://img.shields.io/badge/license-MIT-brightgreen.svg)](https://opensource.org/licenses/MIT)
 [![GoDoc](https://pkg.go.dev/badge/github.com/alexandermac/gosu)](https://pkg.go.dev/github.com/alexandermac/gosu)
 
-A package for self updating go applications. Gets the latest application release from the project's Github repository, when a new version is detected, downloads the update archive, upgrades the application and restarts it automatically.
+A package for self updating go applications. Gets the latest application release from the project's Github repository (public or private), when a new version is detected, downloads the update archive, upgrades the application and restarts it automatically.
 Works in Windows and Linux.
 
-### Install
+## Install
 ```sh
 go get github.com/alexandermac/gosu
 ```
 
-### Usage
+## Usage
 ```go
 package main
 
@@ -21,7 +21,6 @@ import (
 	"log"
 
 	"github.com/alexandermac/gosu"
-	"github.com/sirupsen/logrus"
 )
 
 type AppUpdater struct {
@@ -34,7 +33,6 @@ func NewUpdater(appVersion string) AppUpdater {
 			"alexandermac/superapp", // organization name + project name
 			"",                      // github access token to access private repos
 			appVersion,              // local version of the app
-			logrus.StandardLogger(), // logger
 		),
 	}
 
@@ -47,7 +45,7 @@ func (updater *AppUpdater) CheckUpdates() {
 		log.Panic(err)
 	}
 
-  // gosu.CheckUpdates returns a status code. The code can be used to show information alerts or get the update confirmation from the user
+	// gosu.CheckUpdates returns a status code. The code can be used to show information alerts or get the update confirmation from the user
 	switch res.Code {
 	case gosu.CODE_LATEST_VERSION_IS_USED_ALREADY:
 		fmt.Println(res.Message)
@@ -61,7 +59,7 @@ func (updater *AppUpdater) CheckUpdates() {
 }
 
 func (updater *AppUpdater) UpgradeApp() {
-  // gosu.UpgradeApp downloads the latest app release from github and upgrades the app
+	// gosu.UpgradeApp downloads the latest app release from github and upgrades the app
 	err := updater.gosu.UpgradeApp()
 	if err != nil {
 		log.Panic(err)
@@ -75,8 +73,26 @@ func main() {
 }
 ```
 
-### License
+### New()
+Creates a new instance of `gosu.Updater`.
+
+```go
+gosu := gosu.New(
+	"alexandermac/superapp", // organization name + project name
+	"",                      // github access token to access private repos
+	appVersion,              // local version of the app
+)
+```
+
+### SetLogger(l Logger)
+Sets a custom logger instead a standard `log`, used by default. The provided logger must satisfy the `Logger` interface.
+
+```go
+gosu.SetLogger(logrus.StandardLogger())
+```
+
+## License
 Licensed under the MIT license.
 
-### Author
+## Author
 Alexander Mac

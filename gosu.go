@@ -39,25 +39,12 @@ type Updater struct {
 	issuesUrl     string
 	localVersion  string
 	ghAccessToken string
-	logger        _Logger
 }
 
 type _CheckUpdatesResult struct {
 	Code    string
 	Message string
 	Details string
-}
-
-type _Logger interface {
-	Debug(args ...any)
-	Info(args ...any)
-	Warn(args ...any)
-	Error(args ...any)
-
-	Debugf(format string, args ...any)
-	Infof(format string, args ...any)
-	Warnf(format string, args ...any)
-	Errorf(format string, args ...any)
 }
 
 type _GhReleaseAsset struct {
@@ -74,17 +61,16 @@ type _GhRelease struct {
 	Body      string            `json:"body"`
 }
 
-func New(orgRepoName, ghAccessToken, localVersion string, logger _Logger) *Updater {
+func New(orgRepoName, ghAccessToken, localVersion string) *Updater {
 	return &Updater{
 		issuesUrl:     fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", orgRepoName),
 		localVersion:  localVersion,
 		ghAccessToken: ghAccessToken,
-		logger:        logger,
 	}
 }
 
 func (updater *Updater) CheckUpdates() (_CheckUpdatesResult, error) {
-	updater.logger.Info("Checking for updates")
+	logger.Info("Checking for updates")
 
 	lastRelease, err := updater.getLastRelease()
 	if err != nil {
@@ -103,7 +89,7 @@ func (updater *Updater) CheckUpdates() (_CheckUpdatesResult, error) {
 
 	// up-to-date
 	if remoteSemver.Equal(localSemver) {
-		updater.logger.Info("The latest version is already used")
+		logger.Info("The latest version is already used")
 		return _CheckUpdatesResult{
 			Code:    CODE_LATEST_VERSION_IS_USED_ALREADY,
 			Message: "You already use the latest version.",
@@ -112,7 +98,7 @@ func (updater *Updater) CheckUpdates() (_CheckUpdatesResult, error) {
 
 	// local version is higher
 	if remoteSemver.LessThan(localSemver) {
-		updater.logger.Info("The local version is higher than remote")
+		logger.Info("The local version is higher than remote")
 		return _CheckUpdatesResult{
 			Code:    CODE_UNRELEASED_VERSION_IS_USED,
 			Message: "You use the unreleased version.",
@@ -120,7 +106,7 @@ func (updater *Updater) CheckUpdates() (_CheckUpdatesResult, error) {
 	}
 
 	// new version detected
-	updater.logger.Infof("New version detected %s", lastRelease.TagName)
+	logger.Infof("New version detected %s", lastRelease.TagName)
 	return _CheckUpdatesResult{
 		Code: CODE_UPGRADE_CONFIRMATION,
 		Message: fmt.Sprintf(
@@ -170,14 +156,14 @@ func (updater *Updater) UpgradeApp() error {
 		return err
 	}
 
-	updater.logger.Info("Terminating the app")
+	logger.Info("Terminating the app")
 	os.Exit(0)
 
 	return nil
 }
 
 func (updater *Updater) getLastRelease() (_GhRelease, error) {
-	updater.logger.Info("Getting the last release")
+	logger.Info("Getting the last release")
 
 	res, err := updater.doRequest(http.MethodGet, updater.issuesUrl, nil)
 	if err != nil {
@@ -189,7 +175,7 @@ func (updater *Updater) getLastRelease() (_GhRelease, error) {
 	if err != nil {
 		return _GhRelease{}, err
 	}
-	updater.logger.Debugf("Response Body: %s", resBody)
+	logger.Debugf("Response Body: %s", resBody)
 
 	var ghRelease _GhRelease
 	err = json.Unmarshal(resBody, &ghRelease)
@@ -201,14 +187,14 @@ func (updater *Updater) getLastRelease() (_GhRelease, error) {
 	if err != nil {
 		return _GhRelease{}, err
 	}
-	updater.logger.Debugf("GhRelease: %v", string(ghReleaseStr))
+	logger.Debugf("GhRelease: %v", string(ghReleaseStr))
 
-	updater.logger.Infof("Got the last release: %v successfully", ghRelease)
+	logger.Infof("Got the last release: %v successfully", ghRelease)
 	return ghRelease, nil
 }
 
 func (updater *Updater) downloadAsset(asset _GhReleaseAsset) error {
-	updater.logger.Infof("Downloading the asset %s from %s", asset.Name, asset.Url)
+	logger.Infof("Downloading the asset %s from %s", asset.Name, asset.Url)
 
 	headers := map[string]string{
 		"Accept": "application/octet-stream",
@@ -230,20 +216,20 @@ func (updater *Updater) downloadAsset(asset _GhReleaseAsset) error {
 		return err
 	}
 
-	updater.logger.Infof("Downloaded the asset %s successfully", asset.Name)
+	logger.Infof("Downloaded the asset %s successfully", asset.Name)
 	return nil
 }
 
 func (updater *Updater) createAndRunExtractor(asset _GhReleaseAsset) error {
 	scriptName := fmt.Sprintf(".%s%s", string(os.PathSeparator), asset.updateScriptName)
-	updater.logger.Infof("Creating an extractor script %s", scriptName)
+	logger.Infof("Creating an extractor script %s", scriptName)
 
 	err := os.WriteFile(scriptName, []byte(asset.updateScriptBody), 0777)
 	if err != nil {
 		return err
 	}
 
-	updater.logger.Infof("Running the extractor script %s", scriptName)
+	logger.Infof("Running the extractor script %s", scriptName)
 	cmd := exec.Command(scriptName)
 	err = cmd.Start()
 	if err != nil {
@@ -251,7 +237,7 @@ func (updater *Updater) createAndRunExtractor(asset _GhReleaseAsset) error {
 	}
 	// don't call cmd.Wait because we need to close the app immediately
 
-	updater.logger.Infof("The extractor script run successfully")
+	logger.Infof("The extractor script run successfully")
 	return nil
 }
 
@@ -280,7 +266,7 @@ func (updater *Updater) doRequest(method string, url string, headers map[string]
 		return nil, err
 	}
 
-	updater.logger.Debugf("Response: status=%d", res.StatusCode)
+	logger.Debugf("Response: status=%d", res.StatusCode)
 	return res, nil
 }
 
@@ -288,9 +274,9 @@ func (updater *Updater) parseSemVer(version string) *semver.Version {
 	ret, err := semver.NewVersion(version)
 	if err != nil {
 		if strings.Contains(err.Error(), "Error parsing version segment") {
-			updater.logger.Warnf("Unable to parse version, version=%s", version)
+			logger.Warnf("Unable to parse version, version=%s", version)
 		} else {
-			updater.logger.Error(err)
+			logger.Error(err)
 		}
 		return nil
 	}
