@@ -1,10 +1,16 @@
-# gosu
+<p align="center">
+  <h1 align="center">gosu</h1>
+  <p align="center">A package for self updating Go applications.</p>
+  <p align="center">
+    <a href="https://github.com/alexandermac/gosu/actions/workflows/ci.yml?query=branch%3Amaster"><img src="https://github.com/alexandermac/gosu/actions/workflows/ci.yml/badge.svg" alt="Build Status"></a>
+    <a href="https://goreportcard.com/report/github.com/alexandermac/gosu"><img src="https://goreportcard.com/badge/github.com/alexandermac/gosu" alt="Go Report Card"></a>
+    <a href="https://pkg.go.dev/github.com/alexandermac/gosu"><img src="https://pkg.go.dev/badge/github.com/alexandermac/gosu.svg" alt="Go Docs"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/github/license/alexandermac/gosu.svg" alt="License"></a>
+    <a href="https://img.shields.io/github/v/tag/alexandermac/gosu"><img src="https://img.shields.io/github/v/tag/alexandermac/gosu" alt="GitHub tag"></a>
+  </p>
+</p>
 
-[![Build Status](https://github.com/AlexanderMac/gosu/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexanderMac/gosu/actions/workflows/ci.yml)
-[![MIT license](https://img.shields.io/badge/license-MIT-brightgreen.svg)](https://opensource.org/licenses/MIT)
-[![GoDoc](https://pkg.go.dev/badge/github.com/alexandermac/gosu)](https://pkg.go.dev/github.com/alexandermac/gosu)
-
-A package for self updating go applications. Gets the latest application release from the project's Github repository (public or private), when a new version is detected, downloads the update archive, upgrades the application and restarts it automatically.
+A package for self updating Go applications. Gets the latest application release from the project's Github repository (public or private), when a new version is detected, downloads the update archive, upgrades the application and restarts it automatically.
 Works in Windows and Linux.
 
 ### Install
