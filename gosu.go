@@ -33,9 +33,11 @@ const (
 )
 
 type Updater struct {
-	issuesUrl     string
-	localVersion  string
-	GhAccessToken string
+	ReleasesUrl       string
+	ChangelogUrl      string
+	LocalVersion      string
+	GhAccessToken     string
+	DownloadChangelog bool
 }
 
 type _CheckUpdatesResult struct {
@@ -58,10 +60,16 @@ type _GhRelease struct {
 	Body      string            `json:"body"`
 }
 
+type _GhContent struct {
+	Encoding string `json:"encoding"`
+	Content  string `json:"content"`
+}
+
 func New(orgRepoName, ghAccessToken, localVersion string) *Updater {
 	return &Updater{
-		issuesUrl:     fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", orgRepoName),
-		localVersion:  localVersion,
+		ReleasesUrl:   fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", orgRepoName),
+		ChangelogUrl:  fmt.Sprintf("https://api.github.com/repos/%s/contents/CHANGELOG.md", orgRepoName),
+		LocalVersion:  localVersion,
 		GhAccessToken: ghAccessToken,
 	}
 }
@@ -78,7 +86,7 @@ func (updater *Updater) CheckUpdates() (_CheckUpdatesResult, error) {
 	}
 
 	remoteSemver := updater.parseSemVer(lastRelease.TagName)
-	localSemver := updater.parseSemVer(updater.localVersion)
+	localSemver := updater.parseSemVer(updater.LocalVersion)
 
 	if remoteSemver == nil || localSemver == nil {
 		return _CheckUpdatesResult{
@@ -106,15 +114,26 @@ func (updater *Updater) CheckUpdates() (_CheckUpdatesResult, error) {
 	}
 
 	// new version detected
+	lastReleaseDetails := lastRelease.Body
+	if updater.DownloadChangelog {
+		changelog, err := updater.getChangelog()
+		if err != nil {
+			logger.Warnf("Unable to download changelog, error: %s", err.Error())
+		}
+		if changelog != "" {
+			lastReleaseDetails = changelog
+		}
+	}
+
 	logger.Infof("New version detected %s", lastRelease.TagName)
 	return _CheckUpdatesResult{
 		Code: CODE_UPGRADE_CONFIRMATION,
 		Message: fmt.Sprintf(
 			"Upgrade to a new version? Current version is %s, new version is %s.",
-			updater.localVersion,
+			updater.LocalVersion,
 			lastRelease.TagName,
 		),
-		Details: lastRelease.Body,
+		Details: lastReleaseDetails,
 	}, nil
 }
 
@@ -169,7 +188,7 @@ func (updater *Updater) getLastRelease() (_GhRelease, error) {
 	res, err := updater.getHttpClient().
 		R().
 		SetResult(&ghRelease).
-		Get(updater.issuesUrl)
+		Get(updater.ReleasesUrl)
 	if err != nil {
 		return _GhRelease{}, err
 	}
@@ -179,6 +198,24 @@ func (updater *Updater) getLastRelease() (_GhRelease, error) {
 
 	logger.Infof("Got the last release: %v successfully", ghRelease)
 	return ghRelease, nil
+}
+
+func (updater *Updater) getChangelog() (string, error) {
+	logger.Info("Getting the changelog")
+
+	res, err := updater.getHttpClient().
+		R().
+		SetHeader("Accept", "application/vnd.github.raw").
+		Get(updater.ChangelogUrl)
+	if err != nil {
+		return "", err
+	}
+	if err := updater.checkHttpResponse(res); err != nil {
+		return "", err
+	}
+
+	logger.Info("Got the changelog successfully")
+	return string(res.Body()), nil
 }
 
 func (updater *Updater) downloadAsset(asset _GhReleaseAsset) error {
