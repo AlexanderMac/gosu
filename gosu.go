@@ -2,18 +2,15 @@ package gosu
 
 import (
 	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
-	"time"
 
 	semver "github.com/Masterminds/semver/v3"
+	"github.com/go-resty/resty/v2"
 	"golang.org/x/exp/slices"
 )
 
@@ -38,7 +35,7 @@ const (
 type Updater struct {
 	issuesUrl     string
 	localVersion  string
-	ghAccessToken string
+	GhAccessToken string
 }
 
 type _CheckUpdatesResult struct {
@@ -65,7 +62,7 @@ func New(orgRepoName, ghAccessToken, localVersion string) *Updater {
 	return &Updater{
 		issuesUrl:     fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", orgRepoName),
 		localVersion:  localVersion,
-		ghAccessToken: ghAccessToken,
+		GhAccessToken: ghAccessToken,
 	}
 }
 
@@ -74,7 +71,10 @@ func (updater *Updater) CheckUpdates() (_CheckUpdatesResult, error) {
 
 	lastRelease, err := updater.getLastRelease()
 	if err != nil {
-		return _CheckUpdatesResult{}, err
+		return _CheckUpdatesResult{
+			Code:    CODE_ERROR,
+			Message: fmt.Sprintf("Unable to get updates. %s.", updater.parseHttpError(err)),
+		}, nil
 	}
 
 	remoteSemver := updater.parseSemVer(lastRelease.TagName)
@@ -83,7 +83,7 @@ func (updater *Updater) CheckUpdates() (_CheckUpdatesResult, error) {
 	if remoteSemver == nil || localSemver == nil {
 		return _CheckUpdatesResult{
 			Code:    CODE_ERROR,
-			Message: "Unable to get updates, the semvver is invalid.",
+			Message: "Unable to get updates. The semvver is invalid.",
 		}, nil
 	}
 
@@ -165,29 +165,17 @@ func (updater *Updater) UpgradeApp() error {
 func (updater *Updater) getLastRelease() (_GhRelease, error) {
 	logger.Info("Getting the last release")
 
-	res, err := updater.doRequest(http.MethodGet, updater.issuesUrl, nil)
-	if err != nil {
-		return _GhRelease{}, err
-	}
-	defer res.Body.Close()
-
-	resBody, err := io.ReadAll(res.Body)
-	if err != nil {
-		return _GhRelease{}, err
-	}
-	logger.Debugf("Response Body: %s", resBody)
-
 	var ghRelease _GhRelease
-	err = json.Unmarshal(resBody, &ghRelease)
+	res, err := updater.getHttpClient().
+		R().
+		SetResult(&ghRelease).
+		Get(updater.issuesUrl)
 	if err != nil {
 		return _GhRelease{}, err
 	}
-
-	ghReleaseStr, err := json.MarshalIndent(ghRelease, "", " ")
-	if err != nil {
+	if err := updater.checkHttpResponse(res); err != nil {
 		return _GhRelease{}, err
 	}
-	logger.Debugf("GhRelease: %v", string(ghReleaseStr))
 
 	logger.Infof("Got the last release: %v successfully", ghRelease)
 	return ghRelease, nil
@@ -196,23 +184,15 @@ func (updater *Updater) getLastRelease() (_GhRelease, error) {
 func (updater *Updater) downloadAsset(asset _GhReleaseAsset) error {
 	logger.Infof("Downloading the asset %s from %s", asset.Name, asset.Url)
 
-	headers := map[string]string{
-		"Accept": "application/octet-stream",
-	}
-	res, err := updater.doRequest(http.MethodGet, asset.Url, headers)
+	res, err := updater.getHttpClient().
+		R().
+		SetHeader("Accept", "application/octet-stream").
+		SetOutput(asset.Name).
+		Get(asset.Url)
 	if err != nil {
 		return err
 	}
-	defer res.Body.Close()
-
-	out, err := os.Create(asset.Name)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, res.Body)
-	if err != nil {
+	if err := updater.checkHttpResponse(res); err != nil {
 		return err
 	}
 
@@ -241,33 +221,29 @@ func (updater *Updater) createAndRunExtractor(asset _GhReleaseAsset) error {
 	return nil
 }
 
-func (updater *Updater) doRequest(method string, url string, headers map[string]string) (*http.Response, error) {
-	req, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if updater.ghAccessToken != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", updater.ghAccessToken))
-	}
-	//nolint:golint,gosimple
-	if headers != nil {
-		for headerName, headerValue := range headers {
-			req.Header.Set(headerName, headerValue)
-		}
+func (updater *Updater) getHttpClient() *resty.Client {
+	client := resty.New()
+	client.Header.Set("Accept", "application/vnd.github+json")
+	client.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if updater.GhAccessToken != "" {
+		client.Header.Set("Authorization", fmt.Sprintf("Bearer %s", updater.GhAccessToken))
 	}
 
-	httpClient := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-	res, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
+	return client
+}
 
-	logger.Debugf("Response: status=%d", res.StatusCode)
-	return res, nil
+func (updater *Updater) checkHttpResponse(res *resty.Response) error {
+	if res.IsError() {
+		return fmt.Errorf("Request failed with status: %d. %s", res.StatusCode(), res.String())
+	}
+	return nil
+}
+
+func (updater *Updater) parseHttpError(err error) string {
+	if strings.Contains(err.Error(), "connection refused") {
+		return "Error on connect to remote server"
+	}
+	return err.Error()
 }
 
 func (updater *Updater) parseSemVer(version string) *semver.Version {
