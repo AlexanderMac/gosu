@@ -91,7 +91,7 @@ gosu := gosu.New(
 ```
 
 ##### SetLogger(l Logger)
-Sets a custom logger instead a standard `log`, used by default. The provided logger must satisfy the `Logger` interface.
+Sets a custom logger instead of the standard `log`, used by default. The provided logger must satisfy the `Logger` interface.
 
 ```go
 gosu.SetLogger(logrus.StandardLogger())
