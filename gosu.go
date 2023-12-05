@@ -60,11 +60,6 @@ type _GhRelease struct {
 	Body      string            `json:"body"`
 }
 
-type _GhContent struct {
-	Encoding string `json:"encoding"`
-	Content  string `json:"content"`
-}
-
 func New(orgRepoName, ghAccessToken, localVersion string) *Updater {
 	return &Updater{
 		ReleasesUrl:   fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", orgRepoName),
