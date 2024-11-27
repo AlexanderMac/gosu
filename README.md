@@ -1,24 +1,33 @@
-<p align="center">
-  <h1 align="center">gosu</h1>
-  <p align="center">A package for self updating Go applications.</p>
-  <p align="center">
+<div align="center">
+  <h1>gosu</h1>
+  <p>A package for self updating Go applications</p>
+  <p>
     <a href="https://github.com/alexandermac/gosu/actions/workflows/ci.yml?query=branch%3Amaster"><img src="https://github.com/alexandermac/gosu/actions/workflows/ci.yml/badge.svg" alt="Build Status"></a>
     <a href="https://goreportcard.com/report/github.com/alexandermac/gosu"><img src="https://goreportcard.com/badge/github.com/alexandermac/gosu" alt="Go Report Card"></a>
     <a href="https://pkg.go.dev/github.com/alexandermac/gosu"><img src="https://pkg.go.dev/badge/github.com/alexandermac/gosu.svg" alt="Go Docs"></a>
     <a href="LICENSE"><img src="https://img.shields.io/github/license/alexandermac/gosu.svg" alt="License"></a>
     <a href="https://img.shields.io/github/v/tag/alexandermac/gosu"><img src="https://img.shields.io/github/v/tag/alexandermac/gosu" alt="GitHub tag"></a>
   </p>
-</p>
+</div>
 
 A package for self updating Go applications. Gets the latest application release from the project's Github repository (public or private), when a new version is detected, downloads the update archive, upgrades the application and restarts it automatically.
 Works in Windows and Linux.
 
-### Install
+Works in Go v1.18+.
+
+# Contents
+- [Contents](#contents)
+- [Install](#install)
+- [Usage](#usage)
+- [API](#api)
+- [License](#license)
+
+# Install
 ```sh
 go get github.com/alexandermac/gosu
 ```
 
-### Usage
+# Usage
 ```go
 package main
 
@@ -79,7 +88,9 @@ func main() {
 }
 ```
 
-##### New()
+# API
+
+### New()
 Creates a new instance of `gosu.Updater`.
 
 ```go
@@ -90,15 +101,15 @@ gosu := gosu.New(
 )
 ```
 
-##### SetLogger(l Logger)
+### SetLogger(l Logger)
 Sets a custom logger instead of the standard `log`, used by default. The provided logger must satisfy the `Logger` interface.
 
 ```go
 gosu.SetLogger(logrus.StandardLogger())
 ```
 
-### License
+# License
 Licensed under the MIT license.
 
-### Author
+# Author
 Alexander Mac
