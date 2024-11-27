@@ -1,16 +1,16 @@
 package gosu
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
-	semver "github.com/Masterminds/semver/v3"
-	"github.com/go-resty/resty/v2"
 	"golang.org/x/exp/slices"
 )
 
@@ -26,10 +26,12 @@ const (
 )
 
 const (
-	CODE_LATEST_VERSION_IS_USED_ALREADY = "LATEST_VERSION_IS_USED_ALREADY"
-	CODE_UNRELEASED_VERSION_IS_USED     = "UNRELEASED_VERSION_IS_USED"
-	CODE_UPGRADE_CONFIRMATION           = "UPGRADE_CONFIRMATION"
-	CODE_ERROR                          = "ERROR"
+	CODE_LATEST_VERSION_IS_ALREADY_IN_USE = "LATEST_VERSION_IS_ALREADY_IN_USE"
+	CODE_UNRELEASED_VERSION_IS_IN_USE     = "UNRELEASED_VERSION_IS_IN_USE"
+	CODE_NEW_VERSION_DETECTED             = "NEW_VERSION_DETECTED"
+	CODE_DOWNLOADING_STARTED              = "DOWNLOADING_STARTED"
+	CODE_DOWNLOADING_COMPLETED            = "DOWNLOADING_COMPLETED"
+	CODE_ERROR                            = "ERROR"
 )
 
 type Updater struct {
@@ -38,19 +40,22 @@ type Updater struct {
 	LocalVersion      string
 	GhAccessToken     string
 	DownloadChangelog bool
+	lastRelease       *_GhRelease
+	releaseAsset      *_GhReleaseAsset
+	downloadingCtx    context.Context
+	cancelDownloading context.CancelFunc
 }
 
-type _CheckUpdatesResult struct {
+type State struct {
 	Code    string
 	Message string
 	Details string
 }
 
-type _GhReleaseAsset struct {
-	Name             string `json:"name"`
-	Url              string `json:"url"`
-	updateScriptName string
-	updateScriptBody string
+type DownloadingProgress struct {
+	TotalSize       int
+	CurrentSize     int
+	ProgressPercent int
 }
 
 type _GhRelease struct {
@@ -58,6 +63,13 @@ type _GhRelease struct {
 	CreatedAt string            `json:"created_at"`
 	Assets    []_GhReleaseAsset `json:"assets"`
 	Body      string            `json:"body"`
+}
+
+type _GhReleaseAsset struct {
+	Name             string `json:"name"`
+	Url              string `json:"url"`
+	updateScriptName string
+	updateScriptBody string
 }
 
 func New(orgRepoName, ghAccessToken, localVersion string) *Updater {
@@ -69,43 +81,45 @@ func New(orgRepoName, ghAccessToken, localVersion string) *Updater {
 	}
 }
 
-func (updater *Updater) CheckUpdates() (_CheckUpdatesResult, error) {
+func (updater *Updater) CheckUpdates() State {
 	logger.Info("Checking for updates")
 
 	lastRelease, err := updater.getLastRelease()
 	if err != nil {
-		return _CheckUpdatesResult{
+		return State{
 			Code:    CODE_ERROR,
-			Message: fmt.Sprintf("Unable to get updates. %s.", updater.parseHttpError(err)),
-		}, nil
+			Message: "Unable to get updates.",
+			Details: parseHttpError(err),
+		}
 	}
+	updater.lastRelease = &lastRelease
 
-	remoteSemver := updater.parseSemVer(lastRelease.TagName)
-	localSemver := updater.parseSemVer(updater.LocalVersion)
+	remoteSemver := parseSemVer(lastRelease.TagName)
+	localSemver := parseSemVer(updater.LocalVersion)
 
 	if remoteSemver == nil || localSemver == nil {
-		return _CheckUpdatesResult{
+		return State{
 			Code:    CODE_ERROR,
 			Message: "Unable to get updates. The semvver is invalid.",
-		}, nil
+		}
 	}
 
 	// up-to-date
 	if remoteSemver.Equal(localSemver) {
 		logger.Info("The latest version is already used")
-		return _CheckUpdatesResult{
-			Code:    CODE_LATEST_VERSION_IS_USED_ALREADY,
+		return State{
+			Code:    CODE_LATEST_VERSION_IS_ALREADY_IN_USE,
 			Message: "You already use the latest version.",
-		}, nil
+		}
 	}
 
 	// local version is higher
 	if remoteSemver.LessThan(localSemver) {
 		logger.Info("The local version is higher than remote")
-		return _CheckUpdatesResult{
-			Code:    CODE_UNRELEASED_VERSION_IS_USED,
+		return State{
+			Code:    CODE_UNRELEASED_VERSION_IS_IN_USE,
 			Message: "You use the unreleased version.",
-		}, nil
+		}
 	}
 
 	// new version detected
@@ -121,173 +135,251 @@ func (updater *Updater) CheckUpdates() (_CheckUpdatesResult, error) {
 	}
 
 	logger.Infof("New version detected %s", lastRelease.TagName)
-	return _CheckUpdatesResult{
-		Code: CODE_UPGRADE_CONFIRMATION,
+	return State{
+		Code: CODE_NEW_VERSION_DETECTED,
 		Message: fmt.Sprintf(
-			"Upgrade to a new version? Current version is %s, new version is %s.",
+			"New version detected. Current version is %s, new version is %s. Download update?",
 			updater.LocalVersion,
 			lastRelease.TagName,
 		),
 		Details: lastReleaseDetails,
-	}, nil
+	}
 }
 
-func (updater *Updater) UpgradeApp() error {
-	lastRelease, err := updater.getLastRelease()
-	if err != nil {
-		return err
+func (updater *Updater) DownloadAsset(stateCh chan<- State, progressCh chan<- DownloadingProgress) {
+	if updater.lastRelease == nil {
+		panic(errors.New("lastRelease is nil"))
 	}
+
+	doneDownloadingCh := make(chan bool)
+	defer func() {
+		close(progressCh)
+		close(doneDownloadingCh)
+		close(stateCh)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	updater.downloadingCtx = ctx
+	updater.cancelDownloading = cancel
 
 	var asset _GhReleaseAsset
 	if strings.Contains(runtime.GOOS, "linux") {
-		assetIndex := slices.IndexFunc(lastRelease.Assets, func(asset _GhReleaseAsset) bool {
+		assetIndex := slices.IndexFunc(updater.lastRelease.Assets, func(asset _GhReleaseAsset) bool {
 			return strings.Contains(asset.Name, "-linux")
 		})
-		asset = lastRelease.Assets[assetIndex]
+		asset = updater.lastRelease.Assets[assetIndex]
 		asset.updateScriptName = _LINUX_SCRIPT_NAME
 		asset.updateScriptBody = linuxScript
 	} else if strings.Contains(runtime.GOOS, "windows") {
-		assetIndex := slices.IndexFunc(lastRelease.Assets, func(asset _GhReleaseAsset) bool {
+		assetIndex := slices.IndexFunc(updater.lastRelease.Assets, func(asset _GhReleaseAsset) bool {
 			return strings.Contains(asset.Name, "-win")
 		})
-		asset = lastRelease.Assets[assetIndex]
+		asset = updater.lastRelease.Assets[assetIndex]
 		asset.updateScriptName = _WIN_SCRIPT_NAME
 		asset.updateScriptBody = windowsScript
 	} else {
-		err := errors.New("Unsupported OS: " + runtime.GOOS)
-		if err != nil {
-			return err
+		stateCh <- State{
+			Code:    CODE_ERROR,
+			Message: "Unsupported OS: " + runtime.GOOS,
 		}
+		return
+	}
+	updater.releaseAsset = &asset
+
+	err := removeFile(asset.Name)
+	if err != nil {
+		stateCh <- State{
+			Code:    CODE_ERROR,
+			Message: "Unable to delete the previous asset: " + asset.Name,
+			Details: err.Error(),
+		}
+		return
 	}
 
-	err = updater.downloadAsset(asset)
-	if err != nil {
-		return err
+	stateCh <- State{
+		Code: CODE_DOWNLOADING_STARTED,
 	}
 
-	err = updater.createAndRunExtractor(asset)
+	assetSize, err := updater.getAssetSize(&asset)
 	if err != nil {
-		return err
+		stateCh <- State{
+			Code:    CODE_ERROR,
+			Message: "Unable to download asset.",
+			Details: err.Error(),
+		}
+		return
+	}
+
+	go getDownloadingPercent(progressCh, doneDownloadingCh, asset.Name, assetSize)
+
+	err = updater.downloadAsset(&asset)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		stateCh <- State{
+			Code:    CODE_ERROR,
+			Message: "Unable to download asset.",
+			Details: err.Error(),
+		}
+		return
+	}
+
+	progressCh <- DownloadingProgress{
+		TotalSize:       assetSize,
+		CurrentSize:     assetSize,
+		ProgressPercent: 100,
+	}
+	stateCh <- State{
+		Code:    CODE_DOWNLOADING_COMPLETED,
+		Message: "A new application version downloaded successfully. Restart to complete update?",
+	}
+}
+
+func (updater *Updater) CancelDownloadingAsset() error {
+	if updater.cancelDownloading == nil {
+		return errors.New("cancelDownloading is nil")
+	}
+
+	logger.Info("Cancel downloading")
+	updater.cancelDownloading()
+
+	return nil
+}
+
+func (updater *Updater) UpdateApp() (State, error) {
+	if updater.releaseAsset == nil {
+		return State{}, errors.New("releaseAsset is nil")
+	}
+
+	err := createAndRunExtractor(updater.releaseAsset)
+	if err != nil {
+		return State{
+			Code:    CODE_ERROR,
+			Message: "Unable to create and run extractor.",
+			Details: err.Error(),
+		}, nil
 	}
 
 	logger.Info("Terminating the app")
 	os.Exit(0)
 
-	return nil
+	return State{}, nil
 }
 
 func (updater *Updater) getLastRelease() (_GhRelease, error) {
-	logger.Info("Getting the last release")
+	logger.Debug("Getting the last release")
 
 	var ghRelease _GhRelease
-	res, err := updater.getHttpClient().
+	res, err := getHttpClient(updater.GhAccessToken).
 		R().
 		SetResult(&ghRelease).
 		Get(updater.ReleasesUrl)
 	if err != nil {
 		return _GhRelease{}, err
 	}
-	if err := updater.checkHttpResponse(res); err != nil {
+	if err := checkHttpResponse(res); err != nil {
 		return _GhRelease{}, err
 	}
 
-	logger.Infof("Got the last release: %v successfully", ghRelease)
+	logger.Debugf("Got the last release: %v successfully", ghRelease)
 	return ghRelease, nil
 }
 
 func (updater *Updater) getChangelog() (string, error) {
-	logger.Info("Getting the changelog")
+	logger.Debug("Getting the changelog")
 
-	res, err := updater.getHttpClient().
+	res, err := getHttpClient(updater.GhAccessToken).
 		R().
 		SetHeader("Accept", "application/vnd.github.raw").
 		Get(updater.ChangelogUrl)
 	if err != nil {
 		return "", err
 	}
-	if err := updater.checkHttpResponse(res); err != nil {
+	if err := checkHttpResponse(res); err != nil {
 		return "", err
 	}
 
-	logger.Info("Got the changelog successfully")
+	logger.Debug("Got the changelog successfully")
 	return string(res.Body()), nil
 }
 
-func (updater *Updater) downloadAsset(asset _GhReleaseAsset) error {
-	logger.Infof("Downloading the asset %s from %s", asset.Name, asset.Url)
+func (updater *Updater) getAssetSize(asset *_GhReleaseAsset) (int, error) {
+	logger.Debugf("Getting the asset size %s from %s", asset.Name, asset.Url)
 
-	res, err := updater.getHttpClient().
+	res, err := getHttpClient(updater.GhAccessToken).
 		R().
+		SetHeader("Accept", "application/octet-stream").
+		Head(asset.Url)
+	if err != nil {
+		return 0, err
+	}
+	if err := checkHttpResponse(res); err != nil {
+		return 0, err
+	}
+
+	assetSize, err := strconv.Atoi(res.Header().Get("Content-Length"))
+	if err != nil {
+		return 0, err
+	}
+
+	logger.Debugf("Got the asset size %s successfully", asset.Name)
+	return assetSize, nil
+}
+
+func (updater *Updater) downloadAsset(asset *_GhReleaseAsset) error {
+	logger.Debugf("Downloading the asset %s from %s", asset.Name, asset.Url)
+
+	res, err := getHttpClient(updater.GhAccessToken).
+		SetRetryCount(3).
+		SetTimeout(time.Minute).
+		R().
+		SetContext(updater.downloadingCtx).
 		SetHeader("Accept", "application/octet-stream").
 		SetOutput(asset.Name).
 		Get(asset.Url)
 	if err != nil {
 		return err
 	}
-	if err := updater.checkHttpResponse(res); err != nil {
+	if err := checkHttpResponse(res); err != nil {
 		return err
 	}
 
-	logger.Infof("Downloaded the asset %s successfully", asset.Name)
+	logger.Debugf("Downloaded the asset %s successfully", asset.Name)
 	return nil
 }
 
-func (updater *Updater) createAndRunExtractor(asset _GhReleaseAsset) error {
-	scriptName := fmt.Sprintf(".%s%s", string(os.PathSeparator), asset.updateScriptName)
-	logger.Infof("Creating an extractor script %s", scriptName)
+func getDownloadingPercent(progressCh chan<- DownloadingProgress, doneCh <-chan bool, fileName string, totalSize int) {
+	for {
+		select {
+		case <-doneCh:
+			return
+		default:
+			file, err := os.Open(fileName)
+			if err != nil {
+				if os.IsNotExist(err) {
+					break
+				}
+				logger.Error(err)
+				return
+			}
+			fi, err := file.Stat()
+			if err != nil {
+				logger.Error(err)
+				return
+			}
+			currentSize := fi.Size()
+			if currentSize == 0 {
+				currentSize = 1
+			}
 
-	err := os.WriteFile(scriptName, []byte(asset.updateScriptBody), 0777)
-	if err != nil {
-		return err
-	}
-
-	logger.Infof("Running the extractor script %s", scriptName)
-	cmd := exec.Command(scriptName)
-	err = cmd.Start()
-	if err != nil {
-		return err
-	}
-	// don't call cmd.Wait because we need to close the app immediately
-
-	logger.Infof("The extractor script run successfully")
-	return nil
-}
-
-func (updater *Updater) getHttpClient() *resty.Client {
-	client := resty.New()
-	client.Header.Set("Accept", "application/vnd.github+json")
-	client.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if updater.GhAccessToken != "" {
-		client.Header.Set("Authorization", fmt.Sprintf("Bearer %s", updater.GhAccessToken))
-	}
-
-	return client
-}
-
-func (updater *Updater) checkHttpResponse(res *resty.Response) error {
-	if res.IsError() {
-		return fmt.Errorf("Request failed with status: %d. %s", res.StatusCode(), res.String())
-	}
-	return nil
-}
-
-func (updater *Updater) parseHttpError(err error) string {
-	if strings.Contains(err.Error(), "connection refused") {
-		return "Error on connect to remote server"
-	}
-	return err.Error()
-}
-
-func (updater *Updater) parseSemVer(version string) *semver.Version {
-	ret, err := semver.NewVersion(version)
-	if err != nil {
-		if strings.Contains(err.Error(), "Error parsing version segment") {
-			logger.Warnf("Unable to parse version, version=%s", version)
-		} else {
-			logger.Error(err)
+			progressPercent := float64(currentSize) / float64(totalSize) * 100
+			progressCh <- DownloadingProgress{
+				TotalSize:       totalSize,
+				CurrentSize:     int(currentSize),
+				ProgressPercent: int(progressPercent),
+			}
 		}
-		return nil
+		time.Sleep(time.Millisecond * 50)
 	}
-
-	return ret
 }
