@@ -34,6 +34,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
+	"time"
 
 	"github.com/alexandermac/gosu"
 )
@@ -43,70 +45,118 @@ type AppUpdater struct {
 }
 
 func NewUpdater(appVersion string) AppUpdater {
-	updater := AppUpdater{
+	return AppUpdater{
 		gosu: gosu.New(
-			"alexandermac/superapp", // organization name + project name
-			"",                      // github access token to access private repos
-			appVersion,              // local version of the app
+			os.Getenv("GH_ORG_NAME"),     // organization name + project name
+			os.Getenv("GH_ACCESS_TOKEN"), // github access token to access private repos
+			appVersion,                   // local version of the app
 		),
 	}
-
-	return updater
 }
 
-func (updater *AppUpdater) CheckUpdates() {
-	res, err := updater.gosu.CheckUpdates()
-	if err != nil {
+func (updater *AppUpdater) CheckUpdates() bool {
+	result := updater.gosu.CheckUpdates()
+
+	switch result.Code {
+	case gosu.CODE_LATEST_VERSION_IS_ALREADY_IN_USE, gosu.CODE_UNRELEASED_VERSION_IS_IN_USE, gosu.CODE_NEW_VERSION_DETECTED:
+		fmt.Println(">>>", result.Message, result.Details)
+	case gosu.CODE_ERROR:
+		err := fmt.Errorf("%s. %s", result.Message, result.Details)
 		log.Panic(err)
 	}
 
-	// gosu.CheckUpdates returns a status code. The code can be used to show information alerts or get the update confirmation from the user
-	switch res.Code {
-	case gosu.CODE_LATEST_VERSION_IS_USED_ALREADY:
-		fmt.Println(res.Message)
-	case gosu.CODE_UNRELEASED_VERSION_IS_USED:
-		fmt.Println(res.Message)
-	case gosu.CODE_UPGRADE_CONFIRMATION:
-		fmt.Println(res.Message, res.Details)
-	case gosu.CODE_ERROR:
-		fmt.Println(res.Message)
-	}
+	return result.Code == gosu.CODE_NEW_VERSION_DETECTED
 }
 
-func (updater *AppUpdater) UpgradeApp() {
-	// gosu.UpgradeApp downloads the latest app release from github and upgrades the app
-	err := updater.gosu.UpgradeApp()
-	if err != nil {
+func (updater *AppUpdater) DownloadUpdate() bool {
+	progressCh := make(chan gosu.DownloadingProgress)
+	go func() {
+		for {
+			progress, ok := <-progressCh
+			if !ok {
+				return
+			}
+			fmt.Printf("Asset downloading progress: %d/%d\n", progress.CurrentSize, progress.TotalSize)
+		}
+	}()
+
+	result := updater.gosu.DownloadAsset(progressCh)
+	switch result.Code {
+	case gosu.CODE_DOWNLOADING_CANCELLED, gosu.CODE_DOWNLOADING_COMPLETED:
+		fmt.Println(">>>", result.Message, result.Details)
+	case gosu.CODE_ERROR:
+		err := fmt.Errorf("%s. %s", result.Message, result.Details)
+		log.Panic(err)
+	}
+
+	return result.Code == gosu.CODE_DOWNLOADING_COMPLETED
+}
+
+func (updater *AppUpdater) CancelDownloading() {
+	updater.gosu.CancelAssetDownloading()
+}
+
+func (updater *AppUpdater) UpdateApp() {
+	result := updater.gosu.UpdateApp()
+	switch result.Code {
+	case gosu.CODE_ERROR:
+		err := fmt.Errorf("%s. %s", result.Message, result.Details)
 		log.Panic(err)
 	}
 }
 
 func main() {
-	updater := NewUpdater("1.1.0")
-	updater.CheckUpdates() // check and print the update status
-	updater.UpgradeApp()   // update your local version with the latest version from github
+	updater := NewUpdater("1.3.0")
+	result := updater.CheckUpdates()
+	if !result {
+		return
+	}
+
+	go func() {
+		time.Sleep(time.Second * 5)
+		updater.CancelDownloading()
+	}()
+	result = updater.DownloadUpdate()
+	if !result {
+		return
+	}
+
+	updater.UpdateApp()
 }
+
 ```
 
 # API
 
-### New()
+### New(orgRepoName, ghAccessToken, localVersion string) *Updater
 Creates a new instance of `gosu.Updater`.
 
 ```go
 gosu := gosu.New(
 	"alexandermac/superapp", // organization name + project name
 	"",                      // github access token to access private repos
-	appVersion,              // local version of the app
+	"1.3.0",                 // local version of the app
 )
 ```
 
 ### SetLogger(l Logger)
-Sets a custom logger instead of the standard `log`, used by default. The provided logger must satisfy the `Logger` interface.
+Sets a custom logger instead of the standard `log` used by default. The provided logger must satisfy the `Logger` interface.
 
 ```go
 gosu.SetLogger(logrus.StandardLogger())
 ```
+
+### CheckUpdates() UpdateResult
+Checks for application's updates. Returns struct with code and message indicating that new version exists or not. 
+
+### DownloadAsset(progressCh chan<- DownloadingProgress) UpdateResult
+Downloads a release asset. Accepts an optional channel to get downloading progress notifications.
+
+### CancelAssetDownloading()
+Cancels an asset downloading.
+
+### UpdateApp() UpdateResult
+Installs the downloaded update.
 
 # License
 Licensed under the MIT license.
