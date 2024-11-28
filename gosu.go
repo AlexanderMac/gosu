@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -26,12 +25,14 @@ const (
 )
 
 const (
-	CODE_LATEST_VERSION_IS_ALREADY_IN_USE = "LATEST_VERSION_IS_ALREADY_IN_USE"
-	CODE_UNRELEASED_VERSION_IS_IN_USE     = "UNRELEASED_VERSION_IS_IN_USE"
-	CODE_NEW_VERSION_DETECTED             = "NEW_VERSION_DETECTED"
-	CODE_DOWNLOADING_STARTED              = "DOWNLOADING_STARTED"
-	CODE_DOWNLOADING_COMPLETED            = "DOWNLOADING_COMPLETED"
-	CODE_ERROR                            = "ERROR"
+	// CheckUpdates
+	CODE_LATEST_VERSION_IS_ALREADY_IN_USE = iota
+	CODE_UNRELEASED_VERSION_IS_IN_USE     = iota
+	CODE_NEW_VERSION_DETECTED             = iota
+	// DownloadAsset
+	CODE_DOWNLOADING_CANCELLED = iota
+	CODE_DOWNLOADING_COMPLETED = iota
+	CODE_ERROR                 = iota
 )
 
 type Updater struct {
@@ -46,8 +47,8 @@ type Updater struct {
 	cancelDownloading context.CancelFunc
 }
 
-type State struct {
-	Code    string
+type UpdateResult struct {
+	Code    int
 	Message string
 	Details string
 }
@@ -68,6 +69,7 @@ type _GhRelease struct {
 type _GhReleaseAsset struct {
 	Name             string `json:"name"`
 	Url              string `json:"url"`
+	Size             int    `json:"size"`
 	updateScriptName string
 	updateScriptBody string
 }
@@ -81,12 +83,12 @@ func New(orgRepoName, ghAccessToken, localVersion string) *Updater {
 	}
 }
 
-func (updater *Updater) CheckUpdates() State {
+func (updater *Updater) CheckUpdates() UpdateResult {
 	logger.Info("Checking for updates")
 
 	lastRelease, err := updater.getLastRelease()
 	if err != nil {
-		return State{
+		return UpdateResult{
 			Code:    CODE_ERROR,
 			Message: "Unable to get updates.",
 			Details: parseHttpError(err),
@@ -98,16 +100,16 @@ func (updater *Updater) CheckUpdates() State {
 	localSemver := parseSemVer(updater.LocalVersion)
 
 	if remoteSemver == nil || localSemver == nil {
-		return State{
+		return UpdateResult{
 			Code:    CODE_ERROR,
-			Message: "Unable to get updates. The semvver is invalid.",
+			Message: "Unable to get updates. The SemVer is invalid.",
 		}
 	}
 
 	// up-to-date
 	if remoteSemver.Equal(localSemver) {
 		logger.Info("The latest version is already used")
-		return State{
+		return UpdateResult{
 			Code:    CODE_LATEST_VERSION_IS_ALREADY_IN_USE,
 			Message: "You already use the latest version.",
 		}
@@ -116,7 +118,7 @@ func (updater *Updater) CheckUpdates() State {
 	// local version is higher
 	if remoteSemver.LessThan(localSemver) {
 		logger.Info("The local version is higher than remote")
-		return State{
+		return UpdateResult{
 			Code:    CODE_UNRELEASED_VERSION_IS_IN_USE,
 			Message: "You use the unreleased version.",
 		}
@@ -129,13 +131,11 @@ func (updater *Updater) CheckUpdates() State {
 		if err != nil {
 			logger.Warnf("Unable to download changelog, error: %s", err.Error())
 		}
-		if changelog != "" {
-			lastReleaseDetails = changelog
-		}
+		lastReleaseDetails = changelog
 	}
 
 	logger.Infof("New version detected %s", lastRelease.TagName)
-	return State{
+	return UpdateResult{
 		Code: CODE_NEW_VERSION_DETECTED,
 		Message: fmt.Sprintf(
 			"New version detected. Current version is %s, new version is %s. Download update?",
@@ -146,16 +146,17 @@ func (updater *Updater) CheckUpdates() State {
 	}
 }
 
-func (updater *Updater) DownloadAsset(stateCh chan<- State, progressCh chan<- DownloadingProgress) {
+func (updater *Updater) DownloadAsset(progressCh chan<- DownloadingProgress) UpdateResult {
 	if updater.lastRelease == nil {
 		panic(errors.New("lastRelease is nil"))
 	}
 
-	doneDownloadingCh := make(chan bool)
+	stopCh := make(chan bool)
 	defer func() {
-		close(progressCh)
-		close(doneDownloadingCh)
-		close(stateCh)
+		if progressCh != nil {
+			close(progressCh)
+		}
+		close(stopCh)
 	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -164,107 +165,96 @@ func (updater *Updater) DownloadAsset(stateCh chan<- State, progressCh chan<- Do
 
 	var asset _GhReleaseAsset
 	if strings.Contains(runtime.GOOS, "linux") {
-		assetIndex := slices.IndexFunc(updater.lastRelease.Assets, func(asset _GhReleaseAsset) bool {
-			return strings.Contains(asset.Name, "-linux")
+		assetIndex := slices.IndexFunc(updater.lastRelease.Assets, func(a _GhReleaseAsset) bool {
+			return strings.Contains(a.Name, "-linux")
 		})
 		asset = updater.lastRelease.Assets[assetIndex]
 		asset.updateScriptName = _LINUX_SCRIPT_NAME
 		asset.updateScriptBody = linuxScript
 	} else if strings.Contains(runtime.GOOS, "windows") {
-		assetIndex := slices.IndexFunc(updater.lastRelease.Assets, func(asset _GhReleaseAsset) bool {
-			return strings.Contains(asset.Name, "-win")
+		assetIndex := slices.IndexFunc(updater.lastRelease.Assets, func(a _GhReleaseAsset) bool {
+			return strings.Contains(a.Name, "-win")
 		})
 		asset = updater.lastRelease.Assets[assetIndex]
 		asset.updateScriptName = _WIN_SCRIPT_NAME
 		asset.updateScriptBody = windowsScript
 	} else {
-		stateCh <- State{
+		return UpdateResult{
 			Code:    CODE_ERROR,
 			Message: "Unsupported OS: " + runtime.GOOS,
 		}
-		return
 	}
 	updater.releaseAsset = &asset
 
 	err := removeFile(asset.Name)
 	if err != nil {
-		stateCh <- State{
+		return UpdateResult{
 			Code:    CODE_ERROR,
-			Message: "Unable to delete the previous asset: " + asset.Name,
+			Message: "Unable to delete the old asset: " + asset.Name,
 			Details: err.Error(),
 		}
-		return
 	}
 
-	stateCh <- State{
-		Code: CODE_DOWNLOADING_STARTED,
+	if progressCh != nil {
+		go getDownloadingPercent(progressCh, stopCh, asset.Name, asset.Size)
 	}
-
-	assetSize, err := updater.getAssetSize(&asset)
-	if err != nil {
-		stateCh <- State{
-			Code:    CODE_ERROR,
-			Message: "Unable to download asset.",
-			Details: err.Error(),
-		}
-		return
-	}
-
-	go getDownloadingPercent(progressCh, doneDownloadingCh, asset.Name, assetSize)
 
 	err = updater.downloadAsset(&asset)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			return
+			return UpdateResult{
+				Code:    CODE_DOWNLOADING_CANCELLED,
+				Message: "The asset downloading has been cancelled.",
+			}
 		}
-		stateCh <- State{
+		return UpdateResult{
 			Code:    CODE_ERROR,
 			Message: "Unable to download asset.",
 			Details: err.Error(),
 		}
-		return
 	}
 
-	progressCh <- DownloadingProgress{
-		TotalSize:       assetSize,
-		CurrentSize:     assetSize,
-		ProgressPercent: 100,
+	if progressCh != nil {
+		progressCh <- DownloadingProgress{
+			TotalSize:       asset.Size,
+			CurrentSize:     asset.Size,
+			ProgressPercent: 100,
+		}
 	}
-	stateCh <- State{
+
+	return UpdateResult{
 		Code:    CODE_DOWNLOADING_COMPLETED,
 		Message: "A new application version downloaded successfully. Restart to complete update?",
 	}
 }
 
-func (updater *Updater) CancelDownloadingAsset() error {
+func (updater *Updater) CancelAssetDownloading() {
 	if updater.cancelDownloading == nil {
-		return errors.New("cancelDownloading is nil")
+		panic(errors.New("cancelDownloading is nil"))
 	}
 
-	logger.Info("Cancel downloading")
+	logger.Info("Cancel the asset downloading")
 	updater.cancelDownloading()
-
-	return nil
 }
 
-func (updater *Updater) UpdateApp() (State, error) {
+func (updater *Updater) UpdateApp() UpdateResult {
 	if updater.releaseAsset == nil {
-		return State{}, errors.New("releaseAsset is nil")
+		panic(errors.New("releaseAsset is nil"))
 	}
 
 	err := createAndRunExtractor(updater.releaseAsset)
 	if err != nil {
-		return State{
+		return UpdateResult{
 			Code:    CODE_ERROR,
-			Message: "Unable to create and run extractor.",
+			Message: "Unable to create or run extractor.",
 			Details: err.Error(),
-		}, nil
+		}
 	}
 
 	logger.Info("Terminating the app")
 	os.Exit(0)
 
-	return State{}, nil
+	return UpdateResult{}
 }
 
 func (updater *Updater) getLastRelease() (_GhRelease, error) {
@@ -282,7 +272,7 @@ func (updater *Updater) getLastRelease() (_GhRelease, error) {
 		return _GhRelease{}, err
 	}
 
-	logger.Debugf("Got the last release: %v successfully", ghRelease)
+	logger.Debugf("The last release: %v has been gotten successfully", ghRelease)
 	return ghRelease, nil
 }
 
@@ -300,31 +290,8 @@ func (updater *Updater) getChangelog() (string, error) {
 		return "", err
 	}
 
-	logger.Debug("Got the changelog successfully")
+	logger.Debug("The changelog has been gotten successfully")
 	return string(res.Body()), nil
-}
-
-func (updater *Updater) getAssetSize(asset *_GhReleaseAsset) (int, error) {
-	logger.Debugf("Getting the asset size %s from %s", asset.Name, asset.Url)
-
-	res, err := getHttpClient(updater.GhAccessToken).
-		R().
-		SetHeader("Accept", "application/octet-stream").
-		Head(asset.Url)
-	if err != nil {
-		return 0, err
-	}
-	if err := checkHttpResponse(res); err != nil {
-		return 0, err
-	}
-
-	assetSize, err := strconv.Atoi(res.Header().Get("Content-Length"))
-	if err != nil {
-		return 0, err
-	}
-
-	logger.Debugf("Got the asset size %s successfully", asset.Name)
-	return assetSize, nil
 }
 
 func (updater *Updater) downloadAsset(asset *_GhReleaseAsset) error {
@@ -345,14 +312,14 @@ func (updater *Updater) downloadAsset(asset *_GhReleaseAsset) error {
 		return err
 	}
 
-	logger.Debugf("Downloaded the asset %s successfully", asset.Name)
+	logger.Debugf("The asset %s has been downloaded successfully", asset.Name)
 	return nil
 }
 
-func getDownloadingPercent(progressCh chan<- DownloadingProgress, doneCh <-chan bool, fileName string, totalSize int) {
+func getDownloadingPercent(progressCh chan<- DownloadingProgress, stopCh <-chan bool, fileName string, totalSize int) {
 	for {
 		select {
-		case <-doneCh:
+		case <-stopCh:
 			return
 		default:
 			file, err := os.Open(fileName)
@@ -380,6 +347,6 @@ func getDownloadingPercent(progressCh chan<- DownloadingProgress, doneCh <-chan 
 				ProgressPercent: int(progressPercent),
 			}
 		}
-		time.Sleep(time.Millisecond * 50)
+		time.Sleep(time.Millisecond * 25)
 	}
 }

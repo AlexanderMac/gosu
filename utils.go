@@ -24,7 +24,7 @@ func removeFile(fileName string) error {
 
 func createAndRunExtractor(asset *_GhReleaseAsset) error {
 	scriptName := fmt.Sprintf(".%s%s", string(os.PathSeparator), asset.updateScriptName)
-	logger.Debugf("Creating an extractor script %s", scriptName)
+	logger.Debugf("Creating the extractor script %s", scriptName)
 
 	err := os.WriteFile(scriptName, []byte(asset.updateScriptBody), 0777)
 	if err != nil {
@@ -39,7 +39,7 @@ func createAndRunExtractor(asset *_GhReleaseAsset) error {
 	}
 	// don't call cmd.Wait because we need to close the app immediately
 
-	logger.Debugf("The extractor script run successfully")
+	logger.Debugf("The extractor script has been executed successfully")
 	return nil
 }
 
@@ -72,7 +72,7 @@ func parseSemVer(version string) *semver.Version {
 	ret, err := semver.NewVersion(version)
 	if err != nil {
 		if strings.Contains(err.Error(), "Error parsing version segment") {
-			logger.Warnf("Unable to parse version, version=%s", version)
+			logger.Warnf("Unable to parse the version %s", version)
 		} else {
 			logger.Error(err)
 		}
